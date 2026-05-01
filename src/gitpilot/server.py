@@ -102,11 +102,15 @@ def git_status(path: str = ".") -> dict[str, object]:
         elif line.startswith("1 "):
             # porcelain v2 ordinary entry: 1 XY sub mH mI mW hH hI path
             parts = line.split(" ", maxsplit=8)
+            if len(parts) < 9:
+                continue
             xy = parts[1]
             name = parts[8].split("\t")[0]
         elif line.startswith("2 "):
             # porcelain v2 rename/copy entry: 2 XY sub mH mI mW hH hI Xscore path\torigPath
             parts = line.split(" ", maxsplit=9)
+            if len(parts) < 10:
+                continue
             xy = parts[1]
             name = parts[9].split("\t")[0]
         if line.startswith(("1 ", "2 ")):
@@ -253,6 +257,7 @@ def git_log(
         record = raw_record.strip()
         if not record:
             continue
+        # maxsplit=5 keeps any embedded _SEP chars in the body as part of parts[5]
         parts = record.split(_SEP, 5)
         if len(parts) < 5:
             continue
