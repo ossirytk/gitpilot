@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gitpilot": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/gitpilot", "gitpilot"],
+      "tools": ["*"]
+    }
+  }
+}
