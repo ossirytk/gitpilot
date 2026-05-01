@@ -13,7 +13,7 @@ Git workflow MCP server — wraps `git` and `gh` CLI as structured tool calls, o
 | `git_status` | Inspect the working tree — branch, staged, unstaged, and untracked files |
 | `git_diff` | Show unified diff of working-tree or staged changes |
 | `git_commit` | Stage files and create a commit |
-| `git_log` | View recent commit history with optional branch/author/file filters |
+| `git_log` | View recent commit history with optional branch/author/file filters; set `include_diff_stat: true` to get `files_changed` per commit; output includes `truncated: true` when result was capped by `limit` |
 | `git_show` | Inspect metadata and diff for a specific commit or ref |
 | `git_branch` | List, create, switch, or delete branches |
 | `git_merge` | Merge a branch into the current branch |
