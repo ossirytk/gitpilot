@@ -82,7 +82,7 @@ select = [
     "FURB",
     "RUF",
 ]
-ignore = ["FBT001", "FBT002", "S603", "G004", "S607", "COM812", "PLR0912", "PLR0913", "PLR2004"]
+ignore = ["FBT001", "S603", "G004", "S607", "COM812"]
 unfixable = [
     # Don't touch unused imports
     "F401",
@@ -90,6 +90,7 @@ unfixable = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "PLR2004", "ANN"]
+"src/gitpilot/server.py" = ["FBT002", "PLR0912", "PLR0913", "PLR2004"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

@@ -46,8 +46,13 @@ def _resolve(path: str) -> str:
 
 
 def _run(args: list[str], cwd: str) -> tuple[int, str, str]:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
-    return result.returncode, result.stdout, result.stderr
+    try:
+        result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        cmd = " ".join(args)
+        return 1, "", f"failed to run '{cmd}' in '{cwd}': {exc}"
+    else:
+        return result.returncode, result.stdout, result.stderr
 
 
 def _err(msg: str) -> dict[str, Any]:
@@ -94,12 +99,17 @@ def git_status(path: str = ".") -> dict[str, object]:
                     ahead = int(part[1:])
                 elif part.startswith("-"):
                     behind = int(part[1:])
-        elif line.startswith(("1 ", "2 ")):
-            # porcelain v2: type XY sub mH mI mW hH hI [Xscore] path[\torigPath]
-            parts = line.split(" ")
+        elif line.startswith("1 "):
+            # porcelain v2 ordinary entry: 1 XY sub mH mI mW hH hI path
+            parts = line.split(" ", maxsplit=8)
             xy = parts[1]
-            name_field = parts[8] if line[0] == "1" else parts[9]
-            name = name_field.split("\t")[0]
+            name = parts[8].split("\t")[0]
+        elif line.startswith("2 "):
+            # porcelain v2 rename/copy entry: 2 XY sub mH mI mW hH hI Xscore path\torigPath
+            parts = line.split(" ", maxsplit=9)
+            xy = parts[1]
+            name = parts[9].split("\t")[0]
+        if line.startswith(("1 ", "2 ")):
             _status_labels = {
                 "M": "modified",
                 "A": "added",
@@ -226,7 +236,7 @@ def git_log(
     cwd = _resolve(path)
     limit = min(max(1, limit), 500)
     fmt = f"%H{_SEP}%an{_SEP}%ae{_SEP}%aI{_SEP}%s" if oneline else f"%H{_SEP}%an{_SEP}%ae{_SEP}%aI{_SEP}%s{_SEP}%b"
-    args = ["git", "log", f"--pretty=format:{fmt}", f"-n{limit}"]
+    args = ["git", "log", f"--pretty=format:{fmt}%x00", f"-n{limit}"]
     if branch:
         args.append(branch)
     if author:
@@ -239,10 +249,11 @@ def git_log(
         return _err(stderr.strip() or "git log failed")
 
     commits: list[dict[str, str]] = []
-    for line in stdout.splitlines():
-        if not line.strip():
+    for raw_record in stdout.split("\x00"):
+        record = raw_record.strip()
+        if not record:
             continue
-        parts = line.split(_SEP)
+        parts = record.split(_SEP, 5)
         if len(parts) < 5:
             continue
         entry: dict[str, str] = {
@@ -272,41 +283,43 @@ def git_show(ref: str = "HEAD", path: str = ".") -> dict[str, object]:
         path: Path to the repository root.
     """
     cwd = _resolve(path)
+
+    # Fetch metadata separately to avoid multi-line bodies corrupting stat/diff parsing
     fmt = f"%H{_SEP}%an{_SEP}%ae{_SEP}%aI{_SEP}%s{_SEP}%b"
-    rc, stdout, stderr = _run(["git", "show", f"--pretty=format:{fmt}", "--stat", ref], cwd)
+    rc, meta_out, stderr = _run(["git", "show", "--no-patch", f"--pretty=tformat:{fmt}", ref], cwd)
     if rc != 0:
         return _err(stderr.strip() or "git show failed")
 
-    lines = stdout.splitlines()
     meta: dict[str, str] = {}
+    parts = meta_out.strip().split(_SEP, 5)
+    if len(parts) >= 5:
+        meta = {
+            "sha": parts[0][:12],
+            "sha_full": parts[0],
+            "author": parts[1],
+            "email": parts[2],
+            "date": parts[3],
+            "subject": parts[4],
+            "body": parts[5].strip() if len(parts) > 5 else "",
+        }
+
+    # Fetch stats + diff with an empty format to suppress the commit header
+    rc2, show_out, _ = _run(["git", "show", "--stat", "--patch", "--format=", ref], cwd)
     stat_lines: list[str] = []
     diff_start = 0
-
-    if lines:
-        parts = lines[0].split(_SEP)
-        if len(parts) >= 5:
-            meta = {
-                "sha": parts[0][:12],
-                "sha_full": parts[0],
-                "author": parts[1],
-                "email": parts[2],
-                "date": parts[3],
-                "subject": parts[4],
-                "body": parts[5].strip() if len(parts) > 5 else "",
-            }
-        diff_start = 1
-
-    for i, line in enumerate(lines[diff_start:], diff_start):
-        if line.strip() and "|" in line:
-            stat_lines.append(line.strip())
-        elif line.startswith("diff --git"):
-            diff_start = i
-            break
+    if rc2 == 0:
+        lines = show_out.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() and "|" in line:
+                stat_lines.append(line.strip())
+            elif line.startswith("diff --git"):
+                diff_start = i
+                break
 
     return {
         **meta,
         "stats": stat_lines,
-        "diff": "\n".join(lines[diff_start:]),
+        "diff": "\n".join(show_out.splitlines()[diff_start:]) if rc2 == 0 else "",
     }
 
 
@@ -347,7 +360,7 @@ def git_branch(
         if rc != 0:
             return _err(stderr.strip() or f"Failed to delete branch '{delete}'")
 
-    list_args = ["git", "branch", "--format=%(refname:short) %(HEAD)"]
+    list_args = ["git", "branch", "--format=%(refname:short)\t%(HEAD)\t%(symref)"]
     if remote:
         list_args.append("-a")
     rc, stdout, stderr = _run(list_args, cwd)
@@ -360,9 +373,12 @@ def git_branch(
         stripped = raw_line.strip()
         if not stripped:
             continue
-        parts = stripped.rsplit(" ", 1)
-        name = parts[0].strip()
-        is_current = len(parts) > 1 and parts[1] == "*"
+        fields = stripped.split("\t")
+        name = fields[0]
+        is_current = len(fields) > 1 and fields[1] == "*"
+        symref = fields[2] if len(fields) > 2 else ""
+        if symref:  # skip symbolic refs like remotes/origin/HEAD
+            continue
         branches.append(name)
         if is_current:
             current = name
@@ -542,7 +558,7 @@ def git_remote(
     if rc != 0:
         return _err(stderr.strip() or "git remote -v failed")
 
-    remotes: dict[str, dict[str, str]] = {}
+    remotes: dict[str, dict[str, list[str]]] = {}
     for line in stdout.splitlines():
         parts = line.split()
         if len(parts) < 3:
@@ -550,7 +566,9 @@ def git_remote(
         name, url, kind = parts[0], parts[1], parts[2].strip("()")
         if name not in remotes:
             remotes[name] = {}
-        remotes[name][kind] = url
+        if kind not in remotes[name]:
+            remotes[name][kind] = []
+        remotes[name][kind].append(url)
 
     return {"remotes": remotes}
 
@@ -600,9 +618,8 @@ def git_pull(
     args = ["git", "pull"]
     if rebase:
         args.append("--rebase")
-    args.append(remote)
     if branch:
-        args.append(branch)
+        args += [remote, branch]
     rc, stdout, stderr = _run(args, cwd)
     out = (stdout + stderr).strip()
     if rc != 0:
@@ -787,7 +804,9 @@ def gh_issue_create(
     args = ["gh", "issue", "create", "--title", title, "--body", body]
     if label:
         for lbl in label.split(","):
-            args += ["--label", lbl.strip()]
+            normalized_label = lbl.strip()
+            if normalized_label:
+                args += ["--label", normalized_label]
     if assignee:
         args += ["--assignee", assignee]
     rc, stdout, stderr = _run(args, cwd)
