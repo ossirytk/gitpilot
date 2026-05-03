@@ -14,9 +14,11 @@ mcp: FastMCP = FastMCP(
     instructions=(
         "gitpilot is a Git workflow MCP server optimized for AI assistants. "
         "Use `git_status` to inspect the working tree. "
-        "Use `git_diff` to show changes (staged or unstaged). "
+        "Use `git_diff` to show changes as raw unified diff text (staged or unstaged, optional single file). "
+        "For staged changes or ref-to-ref diffs as structured per-file JSON hunks, use diffpilot's "
+        "`diff_staged` or `diff_refs` instead. "
         "Use `git_commit` to stage and commit changes. "
-        "Use `git_log` to view commit history. "
+        "Use `git_log` to view commit history; set `include_diff_stat: true` to see which files each commit touched. "
         "Use `git_show` to inspect a specific commit or ref. "
         "Use `git_branch` to list, create, switch, or delete branches. "
         "Use `git_merge` to merge a branch into the current branch. "
@@ -226,6 +228,7 @@ def git_log(
     branch: str = "",
     author: str = "",
     file: str = "",
+    include_diff_stat: bool = False,
 ) -> dict[str, object]:
     """Return recent commit history.
 
@@ -236,11 +239,13 @@ def git_log(
         branch: Branch or ref to walk. Defaults to HEAD.
         author: Filter commits by author name or email substring.
         file: Restrict to commits touching this path.
+        include_diff_stat: When True, include the list of files changed in each commit.
     """
     cwd = _resolve(path)
     limit = min(max(1, limit), 500)
     fmt = f"%H{_SEP}%an{_SEP}%ae{_SEP}%aI{_SEP}%s" if oneline else f"%H{_SEP}%an{_SEP}%ae{_SEP}%aI{_SEP}%s{_SEP}%b"
-    args = ["git", "log", f"--pretty=format:{fmt}%x00", f"-n{limit}"]
+    # Request one extra commit to detect truncation without a second query.
+    args = ["git", "log", f"--pretty=format:{fmt}%x00", f"-n{limit + 1}"]
     if branch:
         args.append(branch)
     if author:
@@ -252,7 +257,7 @@ def git_log(
     if rc != 0:
         return _err(stderr.strip() or "git log failed")
 
-    commits: list[dict[str, str]] = []
+    commits: list[dict[str, Any]] = []
     for raw_record in stdout.split("\x00"):
         record = raw_record.strip()
         if not record:
@@ -261,7 +266,7 @@ def git_log(
         parts = record.split(_SEP, 5)
         if len(parts) < 5:
             continue
-        entry: dict[str, str] = {
+        entry: dict[str, Any] = {
             "sha": parts[0][:12],
             "sha_full": parts[0],
             "author": parts[1],
@@ -273,7 +278,34 @@ def git_log(
             entry["body"] = parts[5].strip()
         commits.append(entry)
 
-    return {"commits": commits, "count": len(commits)}
+    truncated = len(commits) > limit
+    if truncated:
+        commits = commits[:limit]
+
+    if include_diff_stat and commits:
+        # Single git call to retrieve changed files for all commits at once,
+        # avoiding a separate subprocess per commit.
+        # \x01 (SOH) marks the start of each commit header; split on \n (not
+        # splitlines, which treats several ASCII control chars as line separators).
+        hash_mark = "\x01"
+        sha_list = [entry["sha_full"] for entry in commits]
+        rc2, out2, _ = _run(
+            ["git", "log", "--no-walk", f"--pretty=format:{hash_mark}%H", "--name-only", *sha_list],
+            cwd,
+        )
+        files_by_sha: dict[str, list[str]] = {}
+        if rc2 == 0:
+            current_sha = ""
+            for line in out2.split("\n"):
+                if line.startswith(hash_mark):
+                    current_sha = line[1:]
+                    files_by_sha.setdefault(current_sha, [])
+                elif line.strip() and current_sha:
+                    files_by_sha[current_sha].append(line.strip())
+        for entry in commits:
+            entry["files_changed"] = files_by_sha.get(entry["sha_full"], [])
+
+    return {"commits": commits, "count": len(commits), "truncated": truncated}
 
 
 # ── git_show ──────────────────────────────────────────────────────────────────
