@@ -282,13 +282,28 @@ def git_log(
     if truncated:
         commits = commits[:limit]
 
-    if include_diff_stat:
+    if include_diff_stat and commits:
+        # Single git call to retrieve changed files for all commits at once,
+        # avoiding a separate subprocess per commit.
+        # \x01 (SOH) marks the start of each commit header; split on \n (not
+        # splitlines, which treats several ASCII control chars as line separators).
+        hash_mark = "\x01"
+        sha_list = [entry["sha_full"] for entry in commits]
+        rc2, out2, _ = _run(
+            ["git", "log", "--no-walk", f"--pretty=format:{hash_mark}%H", "--name-only", *sha_list],
+            cwd,
+        )
+        files_by_sha: dict[str, list[str]] = {}
+        if rc2 == 0:
+            current_sha = ""
+            for line in out2.split("\n"):
+                if line.startswith(hash_mark):
+                    current_sha = line[1:]
+                    files_by_sha.setdefault(current_sha, [])
+                elif line.strip() and current_sha:
+                    files_by_sha[current_sha].append(line.strip())
         for entry in commits:
-            rc2, out2, _ = _run(
-                ["git", "diff-tree", "--no-commit-id", "-r", "--root", "--name-only", entry["sha_full"]],
-                cwd,
-            )
-            entry["files_changed"] = [f for f in out2.splitlines() if f.strip()] if rc2 == 0 else []
+            entry["files_changed"] = files_by_sha.get(entry["sha_full"], [])
 
     return {"commits": commits, "count": len(commits), "truncated": truncated}
 

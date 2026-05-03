@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from gitpilot.server import git_log
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 @pytest.fixture()
 def git_repo(tmp_path: Path) -> Path:
     """Create a temporary git repository with two commits."""
-    env = {"GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.com",
-           "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.com",
-           "HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "HOME": str(tmp_path),
+    }
 
     def run(*args: str) -> None:
         subprocess.run(list(args), cwd=tmp_path, env=env, check=True, capture_output=True)
